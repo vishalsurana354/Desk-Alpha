@@ -2,12 +2,16 @@
 """
 A+ Setup Scanner – yfinance + Telegram
 Runs on GitHub Actions, sends alerts to your phone.
+Supports per-stock scanning via --symbol argument
 """
 
 import yfinance as yf
 import os
 import requests
 import warnings
+import sys
+import argparse
+
 warnings.filterwarnings("ignore")
 
 # ============ CONFIGURATION ============
@@ -38,7 +42,7 @@ UNIVERSE = {
         "NBIS", "BE", "DELL"
     ],
     "Crypto": ["BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD"],
-    "Commodities": ["GC=F", "SI=F", "CL=F"]
+    "Commodities": ["GC=F", "SI=F", "CL=F", "XAU-USD", "XAG-USD"]
 }
 
 # ============ HELPER FUNCTIONS ============
@@ -241,21 +245,42 @@ def send_telegram(message):
 
 # ============ MAIN SCANNER ============
 
-def scan_and_alert():
-    alerts = []
+def get_all_tickers():
+    """Flatten all tickers from universe"""
+    all_tickers = []
     for sector, tickers in UNIVERSE.items():
-        for ticker in tickers:
-            print(f"Scanning {ticker}...")
-            score, info = score_aplus(ticker)
-            if score >= 8:
-                d = info.get("details", {})
-                try:
-                    price_data = yf.download(ticker, period='1d', interval='1m', progress=False)
-                    price = price_data['Close'].iloc[-1] if not price_data.empty else "N/A"
-                except:
-                    price = "N/A"
-                
-                msg = f"""🚨 <b>A+ SETUP ALERT</b> 🚨
+        all_tickers.extend(tickers)
+    return all_tickers
+
+def scan_and_alert(specific_ticker=None):
+    """Scan stocks and send alerts"""
+    tickers_to_scan = []
+    
+    if specific_ticker:
+        # Scan only the specified ticker
+        specific_ticker = specific_ticker.upper()
+        tickers_to_scan = [specific_ticker]
+        print(f"Scanning specific ticker: {specific_ticker}")
+    else:
+        # Scan all tickers
+        tickers_to_scan = get_all_tickers()
+        print(f"Scanning all {len(tickers_to_scan)} tickers...")
+    
+    alerts = []
+    
+    for ticker in tickers_to_scan:
+        print(f"Scanning {ticker}...")
+        score, info = score_aplus(ticker)
+        
+        if score >= 8:
+            d = info.get("details", {})
+            try:
+                price_data = yf.download(ticker, period='1d', interval='1m', progress=False)
+                price = price_data['Close'].iloc[-1] if not price_data.empty else "N/A"
+            except:
+                price = "N/A"
+            
+            msg = f"""🚨 <b>A+ SETUP ALERT</b> 🚨
 <b>{ticker}</b> — Score: {score:.1f}/10
 Direction: {info.get('bias', 'N/A')}
 Current Price: {price}
@@ -273,13 +298,20 @@ Current Price: {price}
 
 ⚠️ Action: Wait for 5m candle confirmation.
 """
-                alerts.append(msg)
+            alerts.append(msg)
+    
     if alerts:
         full = "\n---\n".join(alerts)
         send_telegram(full)
-        print("Alerts sent.")
+        print(f"Alerts sent! Found {len(alerts)} A+ setups.")
     else:
+        if specific_ticker:
+            send_telegram(f"📊 Scan complete for {specific_ticker}\n❌ No A+ setup detected yet.")
         print("No A+ setups found.")
 
 if __name__ == "__main__":
-    scan_and_alert()
+    parser = argparse.ArgumentParser(description="A+ Setup Scanner")
+    parser.add_argument("--symbol", type=str, default="", help="Specific stock symbol to scan")
+    args = parser.parse_args()
+    
+    scan_and_alert(args.symbol if args.symbol else None)
