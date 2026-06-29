@@ -106,10 +106,14 @@ def calculate_rr(entry, stop, tp1):
     return reward / risk if risk > 0 else 0
 
 def trend(data):
-    if len(data) < 50:
+    if data is None or len(data) < 50:
         return "neutral"
-    sma50 = data['Close'].rolling(50).mean().iloc[-1]
-    return "bullish" if data['Close'].iloc[-1] > sma50 else "bearish"
+    try:
+        sma50 = data['Close'].rolling(50).mean().iloc[-1]
+        close = data['Close'].iloc[-1]
+        return "bullish" if close > sma50 else "bearish"
+    except:
+        return "neutral"
 
 # ============ A+ SCORING ============
 
@@ -118,108 +122,113 @@ def score_aplus(ticker):
     score = 0
     reasons = []
 
-    monthly = get_data(ticker, "1d", "6mo")
-    weekly = get_data(ticker, "1wk", "3mo")
-    daily = get_data(ticker, "1d", "2mo")
-    fourh = get_data(ticker, "1h", "1mo")
-    five = get_data(ticker, "5m", "5d")
+    try:
+        monthly = get_data(ticker, "1d", "6mo")
+        weekly = get_data(ticker, "1wk", "3mo")
+        daily = get_data(ticker, "1d", "2mo")
+        fourh = get_data(ticker, "1h", "1mo")
+        five = get_data(ticker, "5m", "5d")
 
-    if any(x is None for x in [weekly, daily, fourh, five]):
-        return 0, {"reason": "Insufficient data"}
+        if any(x is None for x in [weekly, daily, fourh, five]):
+            return 0, {"reason": "Insufficient data"}
 
-    w_trend = trend(weekly)
-    d_trend = trend(daily)
-    h_trend = trend(fourh)
+        w_trend = trend(weekly)
+        d_trend = trend(daily)
+        h_trend = trend(fourh)
 
-    # 1. Bias Alignment (Weekly + Daily + 4H)
-    if w_trend == d_trend == h_trend and w_trend != "neutral":
-        score += 2
-        details["bias"] = f"{w_trend} aligned"
-    else:
-        reasons.append(f"Bias conflict: W={w_trend}, D={d_trend}, 4H={h_trend}")
-        return score, {"score": score, "reasons": reasons, "details": details}
+        # 1. Bias Alignment (Weekly + Daily + 4H)
+        if w_trend == d_trend == h_trend and w_trend != "neutral":
+            score += 2
+            details["bias"] = f"{w_trend} aligned"
+        else:
+            reasons.append(f"Bias conflict: W={w_trend}, D={d_trend}, 4H={h_trend}")
+            return score, {"score": score, "reasons": reasons, "details": details}
 
-    # 2. Liquidity Sweep (5m)
-    sweep_type, swept_level = detect_sweep(five)
-    if sweep_type:
-        score += 1.5
-        details["sweep"] = f"{sweep_type} at {swept_level:.2f}"
-    else:
-        reasons.append("No liquidity sweep")
-
-    # 3. Volume (≥1.5× avg)
-    if five is not None and len(five) > 20:
-        avg_vol = five['Volume'].rolling(20).mean().iloc[-1]
-        last_vol = five['Volume'].iloc[-1]
-        if last_vol >= 1.5 * avg_vol:
+        # 2. Liquidity Sweep (5m)
+        sweep_type, swept_level = detect_sweep(five)
+        if sweep_type:
             score += 1.5
-            details["volume"] = f"{last_vol/avg_vol:.1f}x avg"
+            details["sweep"] = f"{sweep_type} at {swept_level:.2f}"
         else:
-            reasons.append(f"Volume {last_vol/avg_vol:.1f}x < 1.5x")
-    else:
-        reasons.append("Volume data insufficient")
+            reasons.append("No liquidity sweep")
 
-    # 4. FVG (5m)
-    fvg = detect_fvg(five)
-    if fvg:
-        score += 1
-        details["fvg"] = fvg
-    else:
-        reasons.append("No FVG")
-
-    # 5. Order Block (5m)
-    ob = get_order_block(five)
-    if ob:
-        score += 1
-        details["ob"] = f"{ob['level']:.2f}"
-    else:
-        reasons.append("No OB")
-
-    # 6. Fab 4 Box (Daily)
-    fab = get_fab4_territory(daily)
-    if fab == "green" and (d_trend == "bullish" or h_trend == "bullish"):
-        score += 1
-        details["fab4"] = "green"
-    elif fab == "red" and (d_trend == "bearish" or h_trend == "bearish"):
-        score += 1
-        details["fab4"] = "red"
-    else:
-        reasons.append(f"Fab4 {fab} wrong")
-
-    # 7. R:R ≥ 1:2
-    if sweep_type and swept_level is not None:
-        current = five['Close'].iloc[-1]
-        if sweep_type == "swept_low":  # bearish scenario
-            entry = current
-            stop = five['High'].iloc[-1] + (five['High'].iloc[-1] - swept_level) * 0.2
-            tp1 = swept_level - (swept_level - five['Low'].iloc[-1]) * 0.5
-            rr = calculate_rr(entry, stop, tp1)
-            if rr >= 2:
-                score += 1
-                details["rr"] = f"{rr:.2f}"
+        # 3. Volume (≥1.5× avg)
+        if five is not None and len(five) > 20:
+            avg_vol = five['Volume'].rolling(20).mean().iloc[-1]
+            last_vol = five['Volume'].iloc[-1]
+            if last_vol >= 1.5 * avg_vol:
+                score += 1.5
+                details["volume"] = f"{last_vol/avg_vol:.1f}x avg"
             else:
-                reasons.append(f"R:R {rr:.2f} < 2")
+                reasons.append(f"Volume {last_vol/avg_vol:.1f}x < 1.5x")
         else:
-            # bullish scenario – simplified
-            pass
-    else:
-        reasons.append("No sweep for RR")
+            reasons.append("Volume data insufficient")
 
-    # 8. News Conflict (mock)
-    if not check_news_conflict(ticker):
-        score += 1
-        details["news"] = "clear"
-    else:
-        reasons.append("News conflict")
-
-    # Bonus: Monthly bias alignment (adds 1 if aligned with daily)
-    if monthly is not None and len(monthly) > 10:
-        m_trend = "bullish" if monthly['Close'].iloc[-1] > monthly['Close'].rolling(50).mean().iloc[-1] else "bearish"
-        if m_trend == d_trend:
+        # 4. FVG (5m)
+        fvg = detect_fvg(five)
+        if fvg:
             score += 1
-            details["monthly_bonus"] = "aligned"
+            details["fvg"] = fvg
+        else:
+            reasons.append("No FVG")
 
-    return score, {"score": score, "reasons": reasons, "details": details, "bias": d_trend}
+        # 5. Order Block (5m)
+        ob = get_order_block(five)
+        if ob:
+            score += 1
+            details["ob"] = f"{ob['level']:.2f}"
+        else:
+            reasons.append("No OB")
+
+        # 6. Fab 4 Box (Daily)
+        fab = get_fab4_territory(daily)
+        if fab == "green" and (d_trend == "bullish" or h_trend == "bullish"):
+            score += 1
+            details["fab4"] = "green"
+        elif fab == "red" and (d_trend == "bearish" or h_trend == "bearish"):
+            score += 1
+            details["fab4"] = "red"
+        else:
+            reasons.append(f"Fab4 {fab} wrong")
+
+        # 7. R:R ≥ 1:2
+        if sweep_type and swept_level is not None:
+            current = five['Close'].iloc[-1]
+            if sweep_type == "swept_low":  # bearish scenario
+                entry = current
+                stop = five['High'].iloc[-1] + (five['High'].iloc[-1] - swept_level) * 0.2
+                tp1 = swept_level - (swept_level - five['Low'].iloc[-1]) * 0.5
+                rr = calculate_rr(entry, stop, tp1)
+                if rr >= 2:
+                    score += 1
+                    details["rr"] = f"{rr:.2f}"
+                else:
+                    reasons.append(f"R:R {rr:.2f} < 2")
+            else:
+                # bullish scenario – simplified
+                pass
+        else:
+            reasons.append("No sweep for RR")
+
+        # 8. News Conflict (mock)
+        if not check_news_conflict(ticker):
+            score += 1
+            details["news"] = "clear"
+        else:
+            reasons.append("News conflict")
+
+        # Bonus: Monthly bias alignment (adds 1 if aligned with daily)
+        if monthly is not None and len(monthly) > 10:
+            m_trend = trend(monthly)
+            if m_trend == d_trend:
+                score += 1
+                details["monthly_bonus"] = "aligned"
+
+        return score, {"score": score, "reasons": reasons, "details": details, "bias": d_trend}
+    
+    except Exception as e:
+        print(f"Error scoring {ticker}: {str(e)}")
+        return 0, {"reason": f"Error: {str(e)}"}
 
 # ============ TELEGRAM ALERT ============
 
@@ -240,10 +249,16 @@ def scan_and_alert():
             score, info = score_aplus(ticker)
             if score >= 8:
                 d = info.get("details", {})
+                try:
+                    price_data = yf.download(ticker, period='1d', interval='1m', progress=False)
+                    price = price_data['Close'].iloc[-1] if not price_data.empty else "N/A"
+                except:
+                    price = "N/A"
+                
                 msg = f"""🚨 <b>A+ SETUP ALERT</b> 🚨
 <b>{ticker}</b> — Score: {score:.1f}/10
 Direction: {info.get('bias', 'N/A')}
-Current Price: ~{yf.download(ticker, period='1d', interval='1m', progress=False)['Close'].iloc[-1]:.2f}
+Current Price: {price}
 
 ✅ Checklist:
 • Bias: {d.get('bias', 'N/A')}
